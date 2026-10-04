@@ -1,6 +1,6 @@
 # ML-TITANIC
 
-This repository contains Titanic passenger data for machine-learning exploration.
+This repository contains Titanic passenger data for machine-learning project
 
 ## Files
 
