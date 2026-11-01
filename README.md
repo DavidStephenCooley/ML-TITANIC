@@ -11,14 +11,13 @@ This repository contains Titanic passenger data for machine-learning project
 
 ## Insturctions (windows)
 
-Create python venv running version specified in environment table
-
+- Create python venv running version specified in environment table
 - py -3.12 -m venv .venv
-  install requirements from requirements.txt to this venv
-  .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+- install requirements from requirements.txt to this venv
+- .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
-Set python kernel to venv kernal
-Run each block of code in notebook in order
+- Set python kernel to venv kernal
+- Run each block of code in notebook in order
 
 ## AI disclosure
 
