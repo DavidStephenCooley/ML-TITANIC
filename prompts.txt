@@ -1,0 +1,133 @@
+Currently working on pre-processing of this data. I have decided to drop ID, name, ticket, and cabin as they are not useful or incomplete data. Additionally I must impute the missing values in age I want to use a mean imputer here however I would like to use a mean imputation based on gender also e.g. if mean men age is 40 add 40 but if mean women age is 50 add a 50 for each respective gender. What imputer from the scikit learn pipeline can do this? is it just mean but we do some manual parsing of gender or is there an imputer like this?
+
+scikit-learn doesn’t have an imputer for this, so you’re right that it needs some manual handling. SimpleImputer(strategy="mean") calculates one mean per column and can’t condition on another column.
+
+Option 1: pandas
+
+This is the simplest option if you aren’t using a full pipeline yet:
+
+age_means = X_train.groupby("Sex")["Age"].mean()
+
+X_train["Age"] = X_train["Age"].fillna(X_train["Sex"].map(age_means))
+X_test["Age"] = X_test["Age"].fillna(X_test["Sex"].map(age_means))
+
+Calculate the means on the training data only, then reuse them for the test data. Using df.groupby("Sex")["Age"].transform("mean") on the full dataset would leak test data into your preprocessing.
+
+Option 2: custom transformer
+
+This is the better option if you’re using a Pipeline, especially with cross-validation, because the means are recalculated on the training portion of each fold:
+
+from sklearn.base import BaseEstimator, TransformerMixin
+
+class GroupMeanImputer(BaseEstimator, TransformerMixin):
+    def __init__(self, group_col="Sex", target_col="Age"):
+        self.group_col = group_col
+        self.target_col = target_col
+
+    def fit(self, X, y=None):
+        self.means_ = X.groupby(self.group_col)[self.target_col].mean()
+        return self
+
+    def transform(self, X):
+        X = X.copy()
+        X[self.target_col] = X[self.target_col].fillna(
+            X[self.group_col].map(self.means_)
+        )
+        return X
+
+Put it first in the pipeline, because it needs a DataFrame with Sex still in its original form:
+
+from sklearn.pipeline import Pipeline
+
+pipe = Pipeline([
+    ("age_impute", GroupMeanImputer()),
+    ("preprocess", preprocessor),  # your ColumnTransformer that encodes Sex, etc.
+    ("model", model),
+])
+Other missing values
+
+I haven’t opened your notebook, so this assumes the standard Kaggle Titanic dataset and its column names. In that dataset, Age isn’t the only column with gaps:
+
+Embarked: 2 values are missing in the training data, which you can fill with SimpleImputer(strategy="most_frequent").
+Fare: 1 value is missing in Kaggle’s test data, which you can fill with SimpleImputer(strategy="median"). It won’t show up if you only check the training data, but it can still make prediction fail.
+
+Ok I want to first create a training test split my only concern was that of the SibSp and Parch features containing groups of people that can be split between training and test. This could be considered a data leakage. However, I was advised by an expert to ignore this feature from a data leakage perspective. Additionally a feature engineering experiment could be created of this feature by  Createing FamilySize = SibSp + Parch + 1. Maybe also create a binary feature called IsAlone. and comparing performance with a baseline model. For now I want to simply do nothing to sibsp and parch and later see the result of dropping them and/or creating family size and is alone.  Apart from this SibSp Parch conundrum is there any other data you can see being a problem for test and training test splits? I cannot think of one so a simple random split is suitable for test train and validation splitting. Do you find any problems with this assumption?
+
+I’ll check this against your actual data rather than rely on what I know about the standard dataset.
+
+Your assumption mostly holds, but I’d change it in two ways: stratify the split, and use cross-validation instead of a single validation set. Random splitting is fine if your goal is to predict other passengers on this same voyage, but its score will probably be optimistic for groups the model has never seen.
+
+I tested 70/15/15 stratified splits with three seeds, using a pandas equivalent because scikit-learn isn’t installed in the Python I ran.
+
+Possible problems with a random split
+Issue	What I found	What to do
+Shared tickets	344 of 891 passengers share a ticket, and 38–44 of the 134 test rows (about 30%) had a ticket-mate in training.	Accept it for now, and measure the effect (see below).
+Fare as a group identifier	Passengers on the same ticket often have the same Fare, so dropping Ticket may not fully remove the link. I didn’t measure how often.	Include this in your write-up and the group check.
+Identical rows	Once the ID columns are dropped, 111 rows duplicate an earlier row. 16–18 test rows exactly matched a training row, including the label.	Keep them: PassengerId and Name are all unique, so these are different people.
+Class balance	38.4% of passengers survived.	Use stratify, as a plain random split can shift this balance, especially with only 134 test rows.
+Small test set	With 134 rows and about 80% accuracy, the standard error is about ±3.5%, or roughly ±7 points at 95% confidence.	Don’t compare experiments on this set.
+
+The small test set matters most for your plan: FamilySize and IsAlone will probably change accuracy by less than that margin, so a single split can’t reliably rank them.
+
+Recommended approach
+Hold out a test set: set aside 15–20% with stratification, and only score it once at the end.
+Compare experiments with cross-validation: use RepeatedStratifiedKFold on the remaining data, with the same folds for the baseline and each feature set. This replaces the separate validation set.
+Keep preprocessing inside the pipeline: this means your Age means are recalculated from the training portion of each fold.
+from sklearn.model_selection import train_test_split, RepeatedStratifiedKFold
+
+X = titanic_data.drop(columns="Survived")
+y = titanic_data["Survived"]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=42
+)
+cv = RepeatedStratifiedKFold(n_splits=5, n_repeats=10, random_state=42)
+Measuring the ticket leak
+
+Your expert’s advice is reasonable, but you can back it up with a quick check. Run the same model with StratifiedGroupKFold, using Ticket as the group, and compare it to the random cross-validation score. The gap estimates how much shared groups inflate your score.
+
+This needs a small change to your notebook: the cell with drop(..., inplace=True) removes Ticket, so save it first with groups = titanic_data["Ticket"].
+
+Other notes
+IsAlone experiment: 75 passengers with SibSp + Parch = 0 still share a ticket with someone, possibly friends or staff. IsAlone would count them as alone, which is worth mentioning when you discuss the results.
+Notebook correction: your data audit says there’s missing data in age and ticket number, but Ticket has no missing values. The columns with gaps are Age (177), Cabin (687) and Embarked (2).
+Embarked and earlier advice: this CSV has the 891 rows of Kaggle’s training file and you’re splitting it yourself, so the missing Fare I mentioned earlier doesn’t apply. Fare has no missing values here, although 15 passengers have a fare of 0, which may be worth checking.
+
+Creating a dummyRegressor for baseline testing of my model. I am thinking of simply assuming 100% of first class passengers survived 50% of 2nd and 0% of 3rd. Do you think a regressor baseline based on class such as this is a suitable dummyRegressor for this project
+
+Not quite: I’d use a majority-class DummyClassifier as your baseline, and keep a class-based rule only as a second comparison. There are three issues with your version:
+
+Wrong type: Survived is a 0/1 label, so this is a classification problem. DummyRegressor predicts continuous values, while DummyClassifier is the matching tool.
+Not really a dummy: dummy models ignore the input features, so they can’t use Pclass. Your idea is a hand-written rule, which is a valid baseline but needs separate code.
+Numbers don’t match the data: you’ve assumed 100%, 50% and 0%, but the actual survival rates are about 63%, 47% and 24% for 1st, 2nd and 3rd class. The 50% also adds randomness to your score, whereas always predicting that 2nd class died is both repeatable and slightly more accurate.
+Baselines to compare
+
+These accuracies are worked out by hand from the counts in my earlier check, across all 891 rows:
+
+Baseline	Rule	Accuracy
+Majority class	Everyone dies	61.6%
+Your class rule	1st survives, 2nd is a coin flip, 3rd dies	About 67% (expected)
+Deterministic class rule	1st survives, 2nd and 3rd die	67.9%
+Sex rule	Women survive, men die	78.7%
+
+The sex rule is the most useful comparison. Your model needs to clearly beat about 79% to show it’s adding something beyond one simple rule, whereas beating 62% or 68% doesn’t prove much.
+
+Code
+
+I haven’t run this. Calculate these on X_train so that your test set stays untouched:
+
+from sklearn.dummy import DummyClassifier
+from sklearn.metrics import accuracy_score
+from sklearn.model_selection import cross_val_score
+
+dummy = DummyClassifier(strategy="most_frequent")
+dummy_scores = cross_val_score(dummy, X_train, y_train, cv=cv, scoring="accuracy")
+print(f"Majority class: {dummy_scores.mean():.3f}")
+
+class_preds = (X_train["Pclass"] == 1).astype(int)
+sex_preds = (X_train["Sex"] == "female").astype(int)
+
+print(f"Class rule: {accuracy_score(y_train, class_preds):.3f}")
+print(f"Sex rule: {accuracy_score(y_train, sex_preds):.3f}")
+
+The two rules learn nothing from the data, so they don’t need cross-validation. The small difference in how they’re scored won’t affect the comparison much, but your cross-validated model score is the number to compare against them.
